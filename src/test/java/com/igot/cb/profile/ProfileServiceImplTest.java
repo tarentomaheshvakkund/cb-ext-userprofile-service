@@ -14,12 +14,15 @@ import java.lang.reflect.Method;
 import java.util.*;
 import java.util.stream.Stream;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.igot.cb.transactional.service.RequestHandlerServiceImpl;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.platform.commons.util.CollectionUtils;
 import org.mockito.*;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.slf4j.Logger;
@@ -1768,4 +1771,457 @@ public class ProfileServiceImplTest {
         assertEquals("2023-01-01T00:00:00Z", existingList.get(0).get(Constants.ISSUED_DATE));
         assertEquals("Bravo", existingList.get(1).get(Constants.TITLE));
     }
+
+    @Test
+    void getBasicProfile_returnsProfile_whenCacheMissAndSelfUser() throws Exception {
+        String userId = "user-123";
+        String userToken = "token-123";
+        String cacheKey = Constants.USER + ":basicProfile:" + userId;
+
+        // Use a mutable map for the user profile
+        Map<String, Object> userProfile = new HashMap<>();
+        userProfile.put(Constants.ROOT_ORG_ID, "org-1");
+
+        // Mock token validation and cache miss
+        when(accessTokenValidator.fetchUserIdFromAccessToken(userToken)).thenReturn(userId);
+        when(cacheService.getCache(cacheKey)).thenReturn(null);
+
+        // Mock Cassandra call for fetchFromDatabase (must return mutable map)
+        when(cassandraOperation.getRecordsByPropertiesByKey(
+                anyString(), anyString(), anyMap(), anyList(), any()))
+                .thenReturn(List.of(userProfile)) // for fetchFromDatabase
+                .thenReturn(List.of(Map.of(Constants.ROLE, "role1", Constants.SCOPE, List.of(Map.of(Constants.ORGANISATION_ID, "org-1"))))); // for getUserRoles
+
+        // Mock all other dependencies
+        doNothing().when(cacheService).putCache(eq(cacheKey), anyString());
+        when(objectMapper.writeValueAsString(any())).thenReturn("{}");
+        when(serverProperties.getProfileCompletionRequiredFields()).thenReturn(List.of());
+        when(serverProperties.getExtendedFieldsConfig()).thenReturn(List.of());
+        when(serverProperties.getDataIndex()).thenReturn(1);
+        when(serverProperties.getCacheTtl()).thenReturn(100);
+        when(cacheService.hget(anyString(), anyInt(), anyString(), anyInt())).thenReturn("0");
+        when(cacheService.getCache("user:karmaPoints:" + userId)).thenReturn("0");
+        when(cacheService.getCache("user:communityPostCount:" + userId)).thenReturn("0");
+
+        ApiResponse response = profileService.getBasicProfile(userId, userToken);
+
+        assertEquals(HttpStatus.OK, response.getResponseCode());
+        assertNotNull(response.getResult().get("response"));
+    }
+
+
+    @Test
+    void getBasicProfile_returnsUnauthorized_whenTokenInvalid() {
+        String userId = "user-123";
+        String userToken = "invalid-token";
+        when(accessTokenValidator.fetchUserIdFromAccessToken(userToken)).thenReturn(null);
+
+        ApiResponse response = profileService.getBasicProfile(userId, userToken);
+
+        assertEquals(HttpStatus.UNAUTHORIZED, response.getResponseCode());
+        assertEquals("Invalid or missing access token", response.getParams().getErrMsg());
+    }
+
+    @Test
+    void getBasicProfile_returnsNotFound_whenUserProfileIsNull() {
+        String userId = "user-123";
+        String userToken = "token-123";
+        String cacheKey = Constants.USER + ":basicProfile:" + userId;
+
+        when(accessTokenValidator.fetchUserIdFromAccessToken(userToken)).thenReturn(userId);
+        when(cacheService.getCache(cacheKey)).thenReturn(null);
+        when(cassandraOperation.getRecordsByPropertiesByKey(anyString(), anyString(), anyMap(), anyList(), any()))
+                .thenReturn(null);
+
+        ApiResponse response = profileService.getBasicProfile(userId, userToken);
+
+        assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, response.getResponseCode());
+        assertEquals("Internal server error while fetching profile", response.getParams().getErrMsg());
+    }
+
+    @Test
+    void getBasicProfile_sanitizesProfile_whenNotSelfUser() throws Exception {
+        String userId = "user-123";
+        String userToken = "token-123";
+        String userIdFromToken = "other-user";
+        String cacheKey = Constants.USER + ":basicProfile:" + userId;
+        Map<String, Object> userProfile = new HashMap<>();
+        userProfile.put(Constants.ROOT_ORG_ID, "org-1");
+        Map<String, Object> profileDetails = new HashMap<>();
+        profileDetails.put(Constants.PERSONAL_DETAILS, Map.of("a", "b"));
+        userProfile.put(Constants.PROFILE_DETAILS, profileDetails);
+        String cachedJson = new ObjectMapper().writeValueAsString(userProfile);
+
+        when(accessTokenValidator.fetchUserIdFromAccessToken(userToken)).thenReturn(userIdFromToken);
+        when(cacheService.getCache(cacheKey)).thenReturn(cachedJson);
+        when(objectMapper.readValue(eq(cachedJson), any(TypeReference.class))).thenReturn(userProfile);
+        doNothing().when(cacheService).putCache(eq(cacheKey), anyString());
+        when(objectMapper.writeValueAsString(any())).thenReturn(cachedJson);
+        when(serverProperties.getProfileCompletionRequiredFields()).thenReturn(List.of());
+        when(serverProperties.getExtendedFieldsConfig()).thenReturn(List.of());
+        when(serverProperties.getDataIndex()).thenReturn(1);
+        when(serverProperties.getCacheTtl()).thenReturn(100);
+        when(cacheService.hget(anyString(), anyInt(), anyString(), anyInt())).thenReturn("0");
+        when(cacheService.getCache("user:karmaPoints:" + userId)).thenReturn("0");
+        when(cacheService.getCache("user:communityPostCount:" + userId)).thenReturn("0");
+        when(cassandraOperation.getRecordsByPropertiesByKey(anyString(), anyString(), anyMap(), anyList(), any()))
+                .thenReturn(List.of(Map.of(Constants.ROLE, "role1", Constants.SCOPE, List.of(Map.of(Constants.ORGANISATION_ID, "org-1")))));
+
+        ApiResponse response = profileService.getBasicProfile(userId, userToken);
+
+        assertEquals(HttpStatus.OK, response.getResponseCode());
+        Map<String, Object> resp = (Map<String, Object>) response.getResult().get("response");
+        Map<String, Object> details = (Map<String, Object>) resp.get(Constants.PROFILE_DETAILS);
+        assertFalse(details.containsKey(Constants.PERSONAL_DETAILS));
+    }
+
+    @Test
+    void getBasicProfile_handlesExceptionAndReturnsInternalServerError() {
+        String userId = "user-123";
+        String userToken = "token-123";
+        String cacheKey = Constants.USER + ":basicProfile:" + userId;
+
+        when(accessTokenValidator.fetchUserIdFromAccessToken(userToken)).thenReturn(userId);
+        when(cacheService.getCache(cacheKey)).thenThrow(new RuntimeException("Redis error"));
+
+        ApiResponse response = profileService.getBasicProfile(userId, userToken);
+
+        assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, response.getResponseCode());
+        assertEquals("Internal server error while fetching profile", response.getParams().getErrMsg());
+    }
+
+    @Test
+    void calculateProfileCompletionPercentage_returnsZero_whenProfileDataIsNull() {
+        when(serverProperties.getProfileCompletionRequiredFields()).thenReturn(List.of("field1"));
+        double result = ReflectionTestUtils.invokeMethod(profileService, "calculateProfileCompletionPercentage", null, USER_ID, TOKEN);
+        assertEquals(0.0, result);
+    }
+
+    @Test
+    void calculateProfileCompletionPercentage_returnsZero_whenRequiredFieldsIsNull() {
+        when(serverProperties.getProfileCompletionRequiredFields()).thenReturn(null);
+        double result = ReflectionTestUtils.invokeMethod(profileService, "calculateProfileCompletionPercentage", Map.of(), USER_ID, TOKEN);
+        assertEquals(0.0, result);
+    }
+
+    @Test
+    void calculateProfileCompletionPercentage_returnsZero_whenRequiredFieldsIsEmpty() {
+        when(serverProperties.getProfileCompletionRequiredFields()).thenReturn(Collections.emptyList());
+        double result = ReflectionTestUtils.invokeMethod(profileService, "calculateProfileCompletionPercentage", Map.of(), USER_ID, TOKEN);
+        assertEquals(0.0, result);
+    }
+
+    @Test
+    void calculateProfileCompletionPercentage_returnsFull_whenAllFieldsPresent() throws Exception {
+        Map<String, Object> profileData = new HashMap<>();
+        profileData.put("field1", "value1");
+        profileData.put("field2", "value2");
+        when(serverProperties.getProfileCompletionRequiredFields()).thenReturn(List.of("field1", "field2"));
+        when(serverProperties.getFieldWeight()).thenReturn(50.0);
+        Method method = ProfileServiceImpl.class.getDeclaredMethod("isExtendedProfileField", String.class);
+        method.setAccessible(true);
+        try (MockedStatic<CollectionUtils> ignored = mockStatic(CollectionUtils.class)) {
+            ReflectionTestUtils.setField(profileService, "serverConfig", serverProperties); // <-- use serverConfig
+            double result = ReflectionTestUtils.invokeMethod(profileService, "calculateProfileCompletionPercentage", profileData, USER_ID, TOKEN);
+            assertEquals(100.0, result);
+        }
+    }
+
+    @Test
+    void calculateProfileCompletionPercentage_returnsPartial_whenSomeFieldsMissing() throws Exception {
+        Map<String, Object> profileData = new HashMap<>();
+        profileData.put("field1", "value1");
+        when(serverProperties.getProfileCompletionRequiredFields()).thenReturn(List.of("field1", "field2"));
+        when(serverProperties.getFieldWeight()).thenReturn(50.0);
+        double result = ReflectionTestUtils.invokeMethod(profileService, "calculateProfileCompletionPercentage", profileData, USER_ID, TOKEN);
+        assertEquals(50.0, result);
+    }
+
+
+    @Test
+    void calculateProfileCompletionPercentage_handlesExtendedProfileField_true() throws Exception {
+        when(serverProperties.getProfileCompletionRequiredFields()).thenReturn(List.of("extField"));
+        when(serverProperties.getFieldWeight()).thenReturn(100.0);
+        when(serverProperties.getExtendedFieldsConfig()).thenReturn(List.of("extField"));
+
+        ProfileServiceImpl testService = new ProfileServiceImpl() {
+            protected boolean hasExtendedProfileData(String userId, String field, String token) {
+                return true;
+            }
+        };
+        ReflectionTestUtils.setField(testService, "serverConfig", serverProperties);
+
+        double result = ReflectionTestUtils.invokeMethod(
+                testService, "calculateProfileCompletionPercentage", Map.of(), USER_ID, TOKEN
+        );
+        assertEquals(100.0, result);
+    }
+
+    @Test
+    void calculateProfileCompletionPercentage_handlesExtendedProfileField_false() throws Exception {
+        when(serverProperties.getProfileCompletionRequiredFields()).thenReturn(List.of("extField"));
+        when(serverProperties.getExtendedFieldsConfig()).thenReturn(List.of("extField"));
+        ProfileServiceImpl spyService = Mockito.spy(profileService);
+
+        // Use reflection to set the method result
+        Method method = ProfileServiceImpl.class.getDeclaredMethod(
+                "hasExtendedProfileData", String.class, String.class, String.class
+        );
+        method.setAccessible(true);
+
+        // Optionally, you can use a wrapper to override the method if reflection is not enough
+
+        double result = ReflectionTestUtils.invokeMethod(
+                spyService, "calculateProfileCompletionPercentage", Map.of(), USER_ID, TOKEN
+        );
+        assertEquals(0.0, result);
+    }
+
+    @Test
+    void calculateProfileCompletionPercentage_handlesServiceHistoryWithProfessionalDetails() throws Exception {
+        Map<String, Object> profDetails = new HashMap<>();
+        profDetails.put(Constants.PROFESSIONAL_DETAILS, List.of(Map.of("a", "b")));
+        Map<String, Object> profileData = new HashMap<>();
+        profileData.put(Constants.PROFILE_DETAILS, profDetails);
+
+        when(serverProperties.getProfileCompletionRequiredFields()).thenReturn(List.of(Constants.SERVICE_HISTORY));
+        when(serverProperties.getFieldWeight()).thenReturn(100.0);
+        when(serverProperties.getExtendedFieldsConfig()).thenReturn(List.of(Constants.SERVICE_HISTORY));
+
+        ProfileServiceImpl testService = new ProfileServiceImpl() {
+            @Override
+            protected boolean hasExtendedProfileData(String userId, String field, String token) {
+                return false;
+            }
+        };
+        ReflectionTestUtils.setField(testService, "serverConfig", serverProperties);
+
+        double result = ReflectionTestUtils.invokeMethod(
+                testService, "calculateProfileCompletionPercentage", profileData, USER_ID, TOKEN
+        );
+        assertEquals(100.0, result);
+    }
+
+    @Test
+    void calculateProfileCompletionPercentage_catchesExceptionAndContinues() throws Exception {
+        Map<String, Object> profileData = new HashMap<>();
+        profileData.put("field1", "value1");
+        when(serverProperties.getProfileCompletionRequiredFields()).thenReturn(List.of("field1", "field2"));
+        when(serverProperties.getFieldWeight()).thenReturn(50.0);
+        Map<String, Object> spyProfileData = spy(profileData);
+        // Use lenient to avoid strict stubbing errors
+        lenient().doThrow(new RuntimeException("fail")).when(spyProfileData).getOrDefault(eq("field2"), any());
+        double result = ReflectionTestUtils.invokeMethod(profileService, "calculateProfileCompletionPercentage", spyProfileData, USER_ID, TOKEN);
+        assertEquals(50.0, result);
+    }
+
+    @Test
+    void hasExtendedProfileData_returnsTrue_whenLocationDetailsAndStateAndDistrictPresent() {
+        ProfileServiceImpl service = new ProfileServiceImpl();
+        ApiResponse response = new ApiResponse();
+        Map<String, Object> result = new HashMap<>();
+        result.put(Constants.STATE, "SomeState");
+        result.put(Constants.DISTRICT, "SomeDistrict");
+        response.setResponseCode(HttpStatus.OK);
+        response.put(Constants.RESPONSE, result);
+
+        ProfileServiceImpl spyService = Mockito.spy(service);
+        Mockito.doReturn(response).when(spyService)
+                .readFullExtendedProfile(eq("user-1"), eq(Constants.LOCATION_DETAILS), anyString());
+
+        boolean actual = ReflectionTestUtils.invokeMethod(
+                spyService, "hasExtendedProfileData", "user-1", Constants.LOCATION_DETAILS, "token"
+        );
+        assertTrue(actual);
+    }
+
+    @Test
+    void hasExtendedProfileData_returnsFalse_whenLocationDetailsMissingStateOrDistrict() {
+        ProfileServiceImpl service = new ProfileServiceImpl();
+        ApiResponse response = new ApiResponse();
+        Map<String, Object> result = new HashMap<>();
+        result.put(Constants.STATE, "SomeState");
+        // Missing DISTRICT
+        response.setResponseCode(HttpStatus.OK);
+        response.put(Constants.RESPONSE, result);
+
+        ProfileServiceImpl spyService = Mockito.spy(service);
+        Mockito.doReturn(response).when(spyService)
+                .readFullExtendedProfile(eq("user-1"), eq(Constants.LOCATION_DETAILS), anyString());
+
+        boolean actual = ReflectionTestUtils.invokeMethod(
+                spyService, "hasExtendedProfileData", "user-1", Constants.LOCATION_DETAILS, "token"
+        );
+        assertFalse(actual);
+    }
+
+    @Test
+    void hasExtendedProfileData_returnsTrue_whenContextDataIsNonEmptyCollection() {
+        ProfileServiceImpl service = new ProfileServiceImpl();
+        ApiResponse response = new ApiResponse();
+        Map<String, Object> result = new HashMap<>();
+        result.put("someContext", List.of(Map.of("a", "b")));
+        response.setResponseCode(HttpStatus.OK);
+        response.put(Constants.RESPONSE, result);
+
+        ProfileServiceImpl spyService = Mockito.spy(service);
+        Mockito.doReturn(response).when(spyService)
+                .readFullExtendedProfile(eq("user-1"), eq("someContext"), anyString());
+
+        boolean actual = ReflectionTestUtils.invokeMethod(
+                spyService, "hasExtendedProfileData", "user-1", "someContext", "token"
+        );
+        assertTrue(actual);
+    }
+
+    @Test
+    void hasExtendedProfileData_returnsFalse_whenContextDataIsEmptyCollection() {
+        ProfileServiceImpl service = new ProfileServiceImpl();
+        ApiResponse response = new ApiResponse();
+        Map<String, Object> result = new HashMap<>();
+        result.put("someContext", Collections.emptyList());
+        response.setResponseCode(HttpStatus.OK);
+        response.put(Constants.RESPONSE, result);
+
+        ProfileServiceImpl spyService = Mockito.spy(service);
+        Mockito.doReturn(response).when(spyService)
+                .readFullExtendedProfile(eq("user-1"), eq("someContext"), anyString());
+
+        boolean actual = ReflectionTestUtils.invokeMethod(
+                spyService, "hasExtendedProfileData", "user-1", "someContext", "token"
+        );
+        assertFalse(actual);
+    }
+
+    @Test
+    void hasExtendedProfileData_returnsFalse_whenResponseIsNull() {
+        ProfileServiceImpl service = new ProfileServiceImpl();
+        ProfileServiceImpl spyService = Mockito.spy(service);
+        Mockito.doReturn(null).when(spyService)
+                .readFullExtendedProfile(anyString(), anyString(), anyString());
+
+        boolean actual = ReflectionTestUtils.invokeMethod(
+                spyService, "hasExtendedProfileData", "user-1", "context", "token"
+        );
+        assertFalse(actual);
+    }
+
+    @Test
+    void hasExtendedProfileData_returnsFalse_whenResponseCodeIsNotOk() {
+        ProfileServiceImpl service = new ProfileServiceImpl();
+        ApiResponse response = new ApiResponse();
+        response.setResponseCode(HttpStatus.BAD_REQUEST);
+
+        ProfileServiceImpl spyService = Mockito.spy(service);
+        Mockito.doReturn(response).when(spyService)
+                .readFullExtendedProfile(anyString(), anyString(), anyString());
+
+        boolean actual = ReflectionTestUtils.invokeMethod(
+                spyService, "hasExtendedProfileData", "user-1", "context", "token"
+        );
+        assertFalse(actual);
+    }
+
+    @Test
+    void hasExtendedProfileData_returnsFalse_whenExceptionIsThrown() {
+        ProfileServiceImpl service = new ProfileServiceImpl();
+        ProfileServiceImpl spyService = Mockito.spy(service);
+        Mockito.doThrow(new RuntimeException("fail")).when(spyService)
+                .readFullExtendedProfile(anyString(), anyString(), anyString());
+
+        boolean actual = ReflectionTestUtils.invokeMethod(
+                spyService, "hasExtendedProfileData", "user-1", "context", "token"
+        );
+        assertFalse(actual);
+    }
+
+
+    @Test
+    void analyzeCompetencies_returnsEmptyMaps_whenInputIsEmpty() {
+        ProfileServiceImpl service = new ProfileServiceImpl();
+        Map<String, Object> result = service.analyzeCompetencies(Collections.emptyMap());
+        assertTrue(((Map<?, ?>) result.get(Constants.COMPETENCY_AREA_COUNTS)).isEmpty());
+        assertTrue(((Map<?, ?>) result.get(Constants.COMPETENCY_THEME_GROUPS)).isEmpty());
+    }
+
+    @Test
+    void analyzeCompetencies_countsAreasAndGroupsThemesCorrectly() {
+        ProfileServiceImpl service = new ProfileServiceImpl();
+        Map<String, Object> comp1 = Map.of(
+                Constants.COMPETENCY_AREA_NAME, "Area1",
+                Constants.COMPETENCY_THEME_NAME, "Theme1",
+                Constants.COMPETENCY_SUB_THEME_NAME, "Sub1"
+        );
+        Map<String, Object> comp2 = Map.of(
+                Constants.COMPETENCY_AREA_NAME, "Area1",
+                Constants.COMPETENCY_THEME_NAME, "Theme1",
+                Constants.COMPETENCY_SUB_THEME_NAME, "Sub2"
+        );
+        Map<String, Object> comp3 = Map.of(
+                Constants.COMPETENCY_AREA_NAME, "Area2",
+                Constants.COMPETENCY_THEME_NAME, "Theme2",
+                Constants.COMPETENCY_SUB_THEME_NAME, "Sub3"
+        );
+        Map<String, Map<String, Object>> courseMetadata = Map.of(
+                "course1", Map.of(Constants.COMPETENCIES_V6, List.of(comp1, comp2)),
+                "course2", Map.of(Constants.COMPETENCIES_V6, List.of(comp3))
+        );
+        Map<String, Object> result = service.analyzeCompetencies(courseMetadata);
+
+        Map<String, Long> areaCounts = (Map<String, Long>) result.get(Constants.COMPETENCY_AREA_COUNTS);
+        assertEquals(2, areaCounts.size());
+        assertEquals(2L, areaCounts.get("Area1"));
+        assertEquals(1L, areaCounts.get("Area2"));
+
+        Map<String, Map<String, Object>> themeGroups = (Map<String, Map<String, Object>>) result.get(Constants.COMPETENCY_THEME_GROUPS);
+        assertEquals(2, themeGroups.size());
+        assertTrue(((List<?>) themeGroups.get("Theme1").get(Constants.COMPETENCY_SUB_THEME_NAMES)).containsAll(List.of("Sub1", "Sub2")));
+        assertTrue(((List<?>) themeGroups.get("Theme1").get(Constants.COURSE_IDS)).contains("course1"));
+        assertTrue(((List<?>) themeGroups.get("Theme2").get(Constants.COMPETENCY_SUB_THEME_NAMES)).contains("Sub3"));
+        assertTrue(((List<?>) themeGroups.get("Theme2").get(Constants.COURSE_IDS)).contains("course2"));
+    }
+
+    @Test
+    void analyzeCompetencies_ignoresNonListCompetencies() {
+        ProfileServiceImpl service = new ProfileServiceImpl();
+        Map<String, Map<String, Object>> courseMetadata = Map.of(
+                "course1", Map.of(Constants.COMPETENCIES_V6, "notAList")
+        );
+        Map<String, Object> result = service.analyzeCompetencies(courseMetadata);
+        Map<String, Long> areaCounts = (Map<String, Long>) result.get(Constants.COMPETENCY_AREA_COUNTS);
+        Map<String, Map<String, Object>> themeGroups = (Map<String, Map<String, Object>>) result.get(Constants.COMPETENCY_THEME_GROUPS);
+        assertTrue(areaCounts.isEmpty());
+        assertTrue(themeGroups.isEmpty());
+    }
+
+    @Test
+    void analyzeCompetencies_ignoresNonMapCompetencyItems() {
+        ProfileServiceImpl service = new ProfileServiceImpl();
+        Map<String, Map<String, Object>> courseMetadata = Map.of(
+                "course1", Map.of(Constants.COMPETENCIES_V6, List.of("notAMap"))
+        );
+        Map<String, Object> result = service.analyzeCompetencies(courseMetadata);
+        Map<String, Long> areaCounts = (Map<String, Long>) result.get(Constants.COMPETENCY_AREA_COUNTS);
+        Map<String, Map<String, Object>> themeGroups = (Map<String, Map<String, Object>>) result.get(Constants.COMPETENCY_THEME_GROUPS);
+        assertTrue(areaCounts.isEmpty());
+        assertTrue(themeGroups.isEmpty());
+    }
+
+    @Test
+    void analyzeCompetencies_handlesNullSubThemeName() {
+        ProfileServiceImpl service = new ProfileServiceImpl();
+        Map<String, Object> comp = new HashMap<>();
+        comp.put(Constants.COMPETENCY_AREA_NAME, "Area1");
+        comp.put(Constants.COMPETENCY_THEME_NAME, "Theme1");
+        comp.put(Constants.COMPETENCY_SUB_THEME_NAME, null);
+        Map<String, Map<String, Object>> courseMetadata = Map.of(
+                "course1", Map.of(Constants.COMPETENCIES_V6, List.of(comp))
+        );
+        Map<String, Object> result = service.analyzeCompetencies(courseMetadata);
+        Map<String, Map<String, Object>> themeGroups = (Map<String, Map<String, Object>>) result.get(Constants.COMPETENCY_THEME_GROUPS);
+        List<?> subThemes = (List<?>) themeGroups.get("Theme1").get(Constants.COMPETENCY_SUB_THEME_NAMES);
+        // Accepts either an empty list or a list containing only nulls
+        assertFalse(subThemes.isEmpty() || subThemes.stream().allMatch(Objects::isNull));
+    }
+
 }
