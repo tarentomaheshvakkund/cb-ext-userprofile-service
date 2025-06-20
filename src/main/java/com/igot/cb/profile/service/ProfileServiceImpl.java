@@ -324,12 +324,8 @@ public class ProfileServiceImpl implements ProfileService {
             String cachedJson = cacheService.getCache(cacheKey);
             Map<String, Object> userProfile;
             if (StringUtils.isNotEmpty(cachedJson)) {
-                if (cachedJson.trim().startsWith("\"") && cachedJson.contains("\\\"")) {
-                    String unescaped = mapper.readValue(cachedJson, String.class);
-                    userProfile = mapper.readValue(unescaped, new TypeReference<Map<String, Object>>() {});
-                } else {
-                    userProfile = mapper.readValue(cachedJson, new TypeReference<Map<String, Object>>() {});
-                }
+                userProfile = mapper.readValue(cachedJson, new TypeReference<Map<String, Object>>() {
+                });
             }else{
                 userProfile = fetchFromDatabase(userId);
             }
@@ -356,7 +352,7 @@ public class ProfileServiceImpl implements ProfileService {
                 sanitizeProfile(userProfile);
             }
 
-            cacheService.putCache(cacheKey, mapper.writeValueAsString(userProfile));
+            cacheService.putCache(cacheKey,userProfile);
             Map<String,Object> responseMap = new HashMap<>();
             responseMap.put("response", userProfile);
             response.setResponse(responseMap);
@@ -614,8 +610,21 @@ public class ProfileServiceImpl implements ProfileService {
                                     .map(CollectionUtils::isNotEmpty)
                                     .orElse(false));
                 } else {
-                    Object value = profileData.getOrDefault(field, nestedData.get(field));
-                    isFilled = value != null && !value.toString().trim().isEmpty();
+                    if (Constants.EMPLOYMENT_DETAILS.equalsIgnoreCase(field)) {
+                        isFilled = Optional.ofNullable(profileData.get(Constants.PROFILE_DETAILS))
+                                .filter(Map.class::isInstance)
+                                .map(Map.class::cast)
+                                .map(details -> details.get(Constants.EMPLOYMENT_DETAILS))
+                                .filter(Map.class::isInstance)
+                                .map(Map.class::cast)
+                                .map(empDetails -> empDetails.get(Constants.ABOUT_ME))
+                                .map(Object::toString)
+                                .filter(aboutMe -> !aboutMe.trim().isEmpty())
+                                .isPresent();
+                    }else {
+                        Object value = profileData.getOrDefault(field, nestedData.get(field));
+                        isFilled = value != null && !value.toString().trim().isEmpty();
+                    }
                 }
             } catch (Exception e) {
                 logger.warn("Exception checking field '{}' for user '{}': {}", field, userId, e.getMessage());
