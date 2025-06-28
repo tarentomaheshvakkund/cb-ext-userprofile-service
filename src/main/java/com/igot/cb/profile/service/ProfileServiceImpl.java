@@ -808,7 +808,7 @@ public class ProfileServiceImpl implements ProfileService {
                 totalPoints=(int) records.get(0).get(Constants.TOTAL_POINTS);
             }
 
-            cacheService.putCache(redisKey, String.valueOf(totalPoints));
+            cacheService.putCache(redisKey, totalPoints);
             return totalPoints;
         } catch (Exception e) {
             logger.warn("Failed to fetch karma points for userId {}: {}", userId, e.getMessage());
@@ -881,7 +881,7 @@ public class ProfileServiceImpl implements ProfileService {
             }
 
             int postCount = fetchPostCountFromApi(userId);
-            cacheService.putCache(redisKey, String.valueOf(postCount));
+            cacheService.putCache(redisKey, postCount);
             return postCount;
 
         } catch (Exception e) {

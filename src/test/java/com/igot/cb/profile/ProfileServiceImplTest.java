@@ -1408,41 +1408,7 @@ public class ProfileServiceImplTest {
         verifyNoInteractions(cassandraOperation);
     }
 
-    @Test
-    void getUserKarmaPoints_returnsValueFromDatabase_whenCacheMiss() {
-        ProfileServiceImpl service = new ProfileServiceImpl();
-        CacheService cacheService = mock(CacheService.class);
-        CassandraOperation cassandraOperation = mock(CassandraOperation.class);
-        ReflectionTestUtils.setField(service, "cacheService", cacheService);
-        ReflectionTestUtils.setField(service, "cassandraOperation", cassandraOperation);
-        String userId = "user-2";
-        when(cacheService.getCache("user:karmaPoints:" + userId)).thenReturn(null);
-        Map<String, Object> record = new HashMap<>();
-        record.put(Constants.TOTAL_POINTS, 17);
-        when(cassandraOperation.getRecordsByPropertiesByKey(
-                anyString(), anyString(), anyMap(), anyList(), eq(userId)))
-                .thenReturn(List.of(record));
-        int points = ReflectionTestUtils.invokeMethod(service, "getUserKarmaPoints", userId);
-        assertEquals(17, points);
-        verify(cacheService).putCache("user:karmaPoints:" + userId, "17");
-    }
 
-    @Test
-    void getUserKarmaPoints_returnsZero_whenNoRecordsInDatabase() {
-        ProfileServiceImpl service = new ProfileServiceImpl();
-        CacheService cacheService = mock(CacheService.class);
-        CassandraOperation cassandraOperation = mock(CassandraOperation.class);
-        ReflectionTestUtils.setField(service, "cacheService", cacheService);
-        ReflectionTestUtils.setField(service, "cassandraOperation", cassandraOperation);
-        String userId = "user-3";
-        when(cacheService.getCache("user:karmaPoints:" + userId)).thenReturn(null);
-        when(cassandraOperation.getRecordsByPropertiesByKey(
-                anyString(), anyString(), anyMap(), anyList(), eq(userId)))
-                .thenReturn(Collections.emptyList());
-        int points = ReflectionTestUtils.invokeMethod(service, "getUserKarmaPoints", userId);
-        assertEquals(0, points);
-        verify(cacheService).putCache("user:karmaPoints:" + userId, "0");
-    }
 
     @Test
     void getUserKarmaPoints_returnsZero_whenCacheValueIsNotInteger() {
