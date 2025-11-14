@@ -10,6 +10,9 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
 
+/**
+ * Author: mahesh.vakkund
+ */
 @RestController
 @RequestMapping("/v1/masterdata")
 public class MasterDataController {
