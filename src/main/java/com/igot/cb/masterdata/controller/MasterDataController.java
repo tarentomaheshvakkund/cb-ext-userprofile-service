@@ -20,7 +20,7 @@ public class MasterDataController {
     @Autowired
     MasterDataService masterDataService;
 
-    @GetMapping(value = "/list/institutions")
+    @GetMapping(value = "/list/testing")
     public ResponseEntity<ApiResponse> getInstitutionsList(@RequestHeader(Constants.X_AUTH_TOKEN) String authToken) {
         return new ResponseEntity<>(masterDataService.getInstitutionsList(authToken), HttpStatus.OK);
     }
