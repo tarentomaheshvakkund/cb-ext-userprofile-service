@@ -25,7 +25,7 @@ public class MasterDataController {
         return new ResponseEntity<>(masterDataService.getInstitutionsList(authToken), HttpStatus.OK);
     }
 
-    @GetMapping(value = "/list/degrees")
+    @GetMapping(value = "/list/testing/degrees")
     public ResponseEntity<ApiResponse> getDegreesList(@RequestHeader(Constants.X_AUTH_TOKEN) String authToken) {
         return new ResponseEntity<>(masterDataService.getDegreesList(authToken), HttpStatus.OK);
     }
