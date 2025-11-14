@@ -22,7 +22,7 @@ public class MasterDataController {
 
     @GetMapping(value = "/list/testing")
     public ResponseEntity<ApiResponse> getInstitutionsList(@RequestHeader(Constants.X_AUTH_TOKEN) String authToken) {
-        return new ResponseEntity<>(masterDataService.getInstitutionsList(authToken), HttpStatus.OK);
+        return null;
     }
 
     @GetMapping(value = "/list/testing/degrees")
